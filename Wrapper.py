@@ -121,7 +121,7 @@ def est_extrinsic_param(A, homographies):
 
     return rot_tran_list
 
-def loss_func(params, corner_pts_list, world_pts_list, rot_tran_list):
+def loss_func(params, corner_pts_list, world_pts, rot_tran_list):
     alpha, beta, gamma, u0, v0, k1, k2 = params
     A_mat = np.array([[alpha, gamma, u0],
                       [0, beta, v0],
@@ -133,11 +133,11 @@ def loss_func(params, corner_pts_list, world_pts_list, rot_tran_list):
         r1r2t = np.array((rot_tran[:, 0], rot_tran[:, 1], rot_tran[:, 3])).reshape(3, 3)
         r1r2t_t = r1r2t.T
         pred_rt = np.dot(A_mat, r1r2t_t)
-        total_error = 0
-        for j in range(len(world_pts_list)):
-            world_pts = world_pts_list[j]
-            world_pts_2d_homo = np.array([world_pts[0], world_pts[1], 1]).reshape(3, 1)
-            world_pts_3d_homo = np.array([world_pts[0], world_pts[1], 0, 1]).reshape(4, 1)
+        error_sum = 0
+        for j in range(len(world_pts)):
+            world_pts_2d = world_pts[j]
+            world_pts_2d_homo = np.array([world_pts_2d[0], world_pts_2d[1], 1]).reshape(3, 1)
+            world_pts_3d_homo = np.array([world_pts_2d[0], world_pts_2d[1], 0, 1]).reshape(4, 1)
             proj_pts = np.dot(rot_tran, world_pts_3d_homo)
             # proj_pts = np.matmul(rot_tran, world_pts_3d_homo)
             proj_pts /= proj_pts[2]
@@ -152,30 +152,64 @@ def loss_func(params, corner_pts_list, world_pts_list, rot_tran_list):
             v_cap = v + (v-v0)*(k1*t + k2*(t**2))
             mij_cap = np.array([u_cap, v_cap, 1], dtype = 'float32').reshape(3,1)
             error = np.linalg.norm((mij - mij_cap), ord=2)
-            total_error += error
-        error_mat.append(total_error / 54)
+            error_sum += error
+        error_mat.append(error_sum / len(corner_pts_list))
     
     return np.array(error_mat)
 
-def optimization(A, corner_pts_list, world_pts_list, rot_tran_list):
+def optimization(A, corner_pts_list, world_pts, rot_tran_list):
     alpha = A[0, 0]
     gamma = A[0, 1]
     u0 = A[0, 2]
     beta = A[1, 1]
     v0 = A[1, 2]
     optimize_params = opt.least_squares(fun=loss_func, x0 = [alpha, beta, gamma, u0, v0, 0, 0], 
-        method = 'lm', args=(corner_pts_list, world_pts_list, rot_tran_list))
+        method = 'lm', args=(corner_pts_list, world_pts, rot_tran_list))
     [alpha, beta, gamma, u0, v0, k1, k2] = optimize_params.x
     A_opt = np.array([[alpha, gamma, u0],
                       [0, beta, v0],
                       [0, 0, 1]])
     return A_opt, k1, k2
 
-def approx_distortion(A, corner_pts, world_pts):
-    # for c, w in zip(corner_pts, world_pts):
+def reproject_error(A, kc, rot_tran_list, corner_pts_list, world_pts):
+    u0 = A[0, 2]
+    v0 = A[1, 2]
+    k1, k2= kc[0], kc[1]
 
-    # return k
-    pass
+    error_mat = []
+    reproj_pts_list = []
+    for i, corner in enumerate(corner_pts_list):
+        rot_tran = rot_tran_list[i]
+
+        r1r2t = np.array((rot_tran[:, 0], rot_tran[:, 1], rot_tran[:, 3])).reshape(3, 3)
+        r1r2t_t = r1r2t.T
+        pred_rt = np.dot(A, r1r2t_t)
+        error_sum = 0
+        reproj_pts = []
+        for j in range(len(world_pts)):
+            world_pts_2d = world_pts[j]
+            world_pts_2d_homo = np.array([world_pts_2d[0], world_pts_2d[1], 1]).reshape(3, 1)
+            world_pts_3d_homo = np.array([world_pts_2d[0], world_pts_2d[1], 0, 1]).reshape(4, 1)
+            proj_pts = np.dot(rot_tran, world_pts_3d_homo)
+            # proj_pts = np.matmul(rot_tran, world_pts_3d_homo)
+            proj_pts /= proj_pts[2]
+            x, y = proj_pts[0], proj_pts[1]
+            U = np.dot(pred_rt, world_pts_2d_homo)
+            U = U/U[2]
+            u, v = U[0], U[1]
+            mij = corner[j]
+            mij = np.array([mij[0], mij[1], 1], dtype = 'float32').reshape(3,1)
+            t = x**2 + y**2
+            u_cap = u + (u-u0)*(k1*t + k2*(t**2))
+            v_cap = v + (v-v0)*(k1*t + k2*(t**2))
+            mij_cap = np.array([u_cap, v_cap, 1], dtype = 'float32').reshape(3,1)
+            error = np.linalg.norm((mij - mij_cap), ord=2)
+            error_sum += error
+        error_mat.append(error_sum)
+        reproj_pts_list.append(reproj_pts)
+    error_mat = np.array(error_mat)
+    error_avg = np.sum(error_mat) / (len(corner_pts_list) * len(world_pts[0]))
+    return error_avg, reproj_pts_list
 
 def main():
     images = [cv2.imread(file)
@@ -190,9 +224,25 @@ def main():
     A_mat = est_intrinsic_param(homographies)
     rot_tran_list = est_extrinsic_param(A_mat, homographies)
     A_mat_opt, k1, k2 = optimization(A_mat, corner_pts_list, world_pts, rot_tran_list)
-    # k = approx_distortion(A_mat, corner_pts, world_pts)
-
+    kc = np.array([0, 0]).reshape(2, 1)
+    new_kc = np.array([k1, k2]).reshape(2, 1)
+    prev_error, _ = reproject_error(A_mat, kc, rot_tran_list, corner_pts_list, world_pts)
+    new_rot_tran_list = est_extrinsic_param(A_mat_opt, homographies)
+    new_error, reproj_pts_list = reproject_error(A_mat_opt, new_kc, new_rot_tran_list, corner_pts_list, world_pts)
     
+    K = np.array(A_mat_opt, np.float32).reshape(3,3)
+    D = np.array([new_kc[0],new_kc[1], 0, 0] , np.float32)
+    for i,image_points in enumerate(reproj_pts_list):
+        image = cv2.undistort(images[i], K, D)
+        for point in image_points:
+            x = int(point[0])
+            y = int(point[1])
+            image = cv2.circle(image, (x, y), 5, (0, 0, 255), 3)
+        # cv2.imshow('frame', image)
+        cv2.imwrite("./output/rectify_" + str(i) + ".png", image)
+        # cv2.waitKey(0)
+
+    cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':
