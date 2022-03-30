@@ -1,7 +1,7 @@
 import cv2
 import glob
 import numpy as np
-# from scipy.optimize import
+import scipy.optimize as opt
 
 # Defining the dimensions of checkerboard
 CHECKERBOARD_SIZE = 21.5  # inch
@@ -13,41 +13,36 @@ objpoints = []
 # Creating vector to store vectors of 2D points for each checkerboard image
 imgpoints = []
 # Defining the world coordinates
-# world_coord = np.array([[CHECKERBOARD_SIZE, CHECKERBOARD_SIZE],
+# world_pts = np.array([[CHECKERBOARD_SIZE, CHECKERBOARD_SIZE],
 #                          [CHECKERBOARD_SIZE * CHECKERBOARD[0], CHECKERBOARD_SIZE],
 #                          [CHECKERBOARD_SIZE * CHECKERBOARD[0], CHECKERBOARD_SIZE * CHECKERBOARD[1]],
 #                          [CHECKERBOARD_SIZE, CHECKERBOARD_SIZE*CHECKERBOARD[1]]], np.float32)
-homographies = []
 
 
-def est_homography(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    ret, corners = cv2.findChessboardCorners(gray, CHECKERBOARD, None)
-    world_coord_x, world_coord_y = np.meshgrid(
-        range(CHECKERBOARD[0]), range(CHECKERBOARD[1]))
-    world_coord = np.hstack((world_coord_x.reshape(
-        54, 1), world_coord_y.reshape(54, 1))).astype(np.float32)
-    world_coord *= CHECKERBOARD_SIZE
-    world_coord = np.array(world_coord)
-    if ret == True:
-        # objpoints.append(world_coord)
-        # reshape corners from (54, 1, 2) to (54, 2)
-        corners = corners.reshape(corners.shape[0], 2)
-        corners = corners.reshape(-1, 2)
-        corners2 = cv2.cornerSubPix(
-            gray, corners, (11, 11), (-1, -1), criteria)
-        # imgpoints.append(corners2)
-        # Draw and display the corners
-        img = cv2.drawChessboardCorners(img, CHECKERBOARD, corners2, ret)
-        H, _ = cv2.findHomography(world_coord, corners2)
-        homographies.append(H)
-        # cv2.imshow('img', img)
-        # cv2.waitKey(300)
-    else:
-        print('No checkerboard found')
-        return None
+def est_homography(img_list, world_pts):
+    homographies = []
+    corner_pts_list = []
+    for img in img_list:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        ret, corners = cv2.findChessboardCorners(gray, CHECKERBOARD, None)
+        if ret == True:
+            # reshape corners from (54, 1, 2) to (54, 2)
+            corners = corners.reshape(corners.shape[0], 2)
+            corners = corners.reshape(-1, 2)
+            corners2 = cv2.cornerSubPix(
+                gray, corners, (11, 11), (-1, -1), criteria)
+            # Draw and display the corners
+            img = cv2.drawChessboardCorners(img, CHECKERBOARD, corners2, ret)
+            H, _ = cv2.findHomography(world_pts, corners2)
+            homographies.append(H)
+            corner_pts_list.append(corners2)
+            # cv2.imshow('img', img)
+            # cv2.waitKey(300)
+        else:
+            print('No checkerboard found')
+            return None
     # cv2.destroyAllWindows()
-    return homographies
+    return homographies, corner_pts_list
 
 
 def v_mat(H, i, j):
@@ -61,7 +56,6 @@ def v_mat(H, i, j):
     return np.reshape(v, (6, 1))
     # return v.T
 
-
 def v(p, q, H):
     return np.array([
         H[0, p] * H[0, q],
@@ -72,34 +66,16 @@ def v(p, q, H):
         H[2, p] * H[2, q]
     ])
 
-def getVij(hi, hj):
-    Vij = np.array([ hi[0]*hj[0], hi[0]*hj[1] + hi[1]*hj[0], hi[1]*hj[1], hi[2]*hj[0] + hi[0]*hj[2], hi[2]*hj[1] + hi[1]*hj[2], hi[2]*hj[2] ])
-    return Vij.T
-
-def getV(all_H):
-    v = []
-    for H in all_H:
-        h1 = H[:,0]
-        h2 = H[:,1]
-
-        v12 = getVij(h1, h2)
-        v11 = getVij(h1, h1)
-        v22 = getVij(h2, h2)
-        v.append(v12.T)
-        v.append((v11 - v22).T)
-    return np.array(v)
-
 def est_intrinsic_param(homographies):
-    # V = []
-    # for h in homographies:
-    #     # V.append(v_mat(h, 0, 1).T)
-    #     # V.append((v_mat(h, 0, 0) - v_mat(h, 1, 1)).T)
-    #     V.append(v(0, 1, h))
-    #     V.append(v(0, 0, h) - v(1, 1, h))
+    V = []
+    for h in homographies:
+        # V.append(v_mat(h, 0, 1).T)
+        # V.append((v_mat(h, 0, 0) - v_mat(h, 1, 1)).T)
+        V.append(v(0, 1, h))
+        V.append(v(0, 0, h) - v(1, 1, h))
 
-    # V = np.array(V)
-    V = getV(homographies)
-    _, S, Vt = np.linalg.svd(V)
+    V = np.array(V)
+    _, _, Vt = np.linalg.svd(V)
     b = Vt[-1, :]
 
     B11 = b[0]
@@ -123,34 +99,100 @@ def est_intrinsic_param(homographies):
     return A_mat
 
 
-def est_extrinsic_param(A):
+def est_extrinsic_param(A, homographies):
     A_inv = np.linalg.inv(A)
-    # Rotation vectors
-    r1 = np.dot(A_inv, A[:, 0])
-    lamda = np.linalg.norm(r1, ord=2)
-    r1 = r1/lamda
-    r2 = np.dot(A_inv, A[:, 1])/lamda
-    r3 = np.cross(r1, r2)
-    # Translation vectors
-    t = np.dot(A_inv, A[:, 2])/lamda
-    R = np.array([r1, r2, r3])
-    R = R.T
+    rot_tran_list = []
+    for H in homographies:
+        # Rotation vectors
+        r1 = np.dot(A_inv, H[:, 0])
+        lamda = np.linalg.norm(r1, ord=2)
+        r1 = r1/lamda
+        r2 = np.dot(A_inv, H[:, 1])/lamda
+        r3 = np.cross(r1, r2)
+        # Translation vectors
+        t = np.dot(A_inv, H[:, 2])/lamda
+        R = np.array([r1, r2, r3])
+        R = R.T
+        # extrinsic = np.zeros((3, 4))
+        # extrinsic[:, :-1] = R
+        # extrinsic[:, -1] = t
+        rot_tran = np.vstack((r1, r2, r3, t)).T
+        rot_tran_list.append(rot_tran)
 
-    return R, t
+    return rot_tran_list
 
+def loss_func(params, corner_pts_list, world_pts_list, rot_tran_list):
+    alpha, beta, gamma, u0, v0, k1, k2 = params
+    A_mat = np.array([[alpha, gamma, u0],
+                      [0, beta, v0],
+                      [0, 0, 1]])
+    error_mat = []
+    for i, corner in enumerate(corner_pts_list):
+        rot_tran = rot_tran_list[i]
+
+        r1r2t = np.array((rot_tran[:, 0], rot_tran[:, 1], rot_tran[:, 3])).reshape(3, 3)
+        r1r2t_t = r1r2t.T
+        pred_rt = np.dot(A_mat, r1r2t_t)
+        total_error = 0
+        for j in range(len(world_pts_list)):
+            world_pts = world_pts_list[j]
+            world_pts_2d_homo = np.array([world_pts[0], world_pts[1], 1]).reshape(3, 1)
+            world_pts_3d_homo = np.array([world_pts[0], world_pts[1], 0, 1]).reshape(4, 1)
+            proj_pts = np.dot(rot_tran, world_pts_3d_homo)
+            # proj_pts = np.matmul(rot_tran, world_pts_3d_homo)
+            proj_pts /= proj_pts[2]
+            x, y = proj_pts[0], proj_pts[1]
+            U = np.dot(pred_rt, world_pts_2d_homo)
+            U = U/U[2]
+            u, v = U[0], U[1]
+            mij = corner[j]
+            mij = np.array([mij[0], mij[1], 1], dtype = 'float32').reshape(3,1)
+            t = x**2 + y**2
+            u_cap = u + (u-u0)*(k1*t + k2*(t**2))
+            v_cap = v + (v-v0)*(k1*t + k2*(t**2))
+            mij_cap = np.array([u_cap, v_cap, 1], dtype = 'float32').reshape(3,1)
+            error = np.linalg.norm((mij - mij_cap), ord=2)
+            total_error += error
+        error_mat.append(total_error / 54)
+    
+    return np.array(error_mat)
+
+def optimization(A, corner_pts_list, world_pts_list, rot_tran_list):
+    alpha = A[0, 0]
+    gamma = A[0, 1]
+    u0 = A[0, 2]
+    beta = A[1, 1]
+    v0 = A[1, 2]
+    optimize_params = opt.least_squares(fun=loss_func, x0 = [alpha, beta, gamma, u0, v0, 0, 0], 
+        method = 'lm', args=(corner_pts_list, world_pts_list, rot_tran_list))
+    [alpha, beta, gamma, u0, v0, k1, k2] = optimize_params.x
+    A_opt = np.array([[alpha, gamma, u0],
+                      [0, beta, v0],
+                      [0, 0, 1]])
+    return A_opt, k1, k2
+
+def approx_distortion(A, corner_pts, world_pts):
+    # for c, w in zip(corner_pts, world_pts):
+
+    # return k
+    pass
 
 def main():
     images = [cv2.imread(file)
               for file in glob.glob('./Calibration_Imgs/*.jpg')]
-    for img in images:
-        homographies = est_homography(img)
-        A_mat = est_intrinsic_param(homographies)
-        R, t = est_extrinsic_param(A_mat)
-        print(R, t)
-        # cv2.imshow('img', img)
-        # cv2.waitKey(0)
+    world_pts_x, world_pts_y = np.meshgrid(
+            range(CHECKERBOARD[0]), range(CHECKERBOARD[1]))
+    world_pts = np.hstack((world_pts_x.reshape(
+        54, 1), world_pts_y.reshape(54, 1))).astype(np.float32)
+    world_pts *= CHECKERBOARD_SIZE
+    world_pts = np.array(world_pts)
+    homographies, corner_pts_list = est_homography(images, world_pts)
+    A_mat = est_intrinsic_param(homographies)
+    rot_tran_list = est_extrinsic_param(A_mat, homographies)
+    A_mat_opt, k1, k2 = optimization(A_mat, corner_pts_list, world_pts, rot_tran_list)
+    # k = approx_distortion(A_mat, corner_pts, world_pts)
 
-    cv2.destroyAllWindows()
+    
 
 
 if __name__ == '__main__':
